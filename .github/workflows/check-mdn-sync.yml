@@ -1,0 +1,92 @@
+name: Check MDN translation sync and send LINE broadcast
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 每天 12:00 台灣時間（UTC+8）
+  workflow_dispatch:
+
+jobs:
+  check-and-broadcast:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout mdn/content
+        uses: actions/checkout@v4
+        with:
+          repository: mdn/content
+          path: content
+          fetch-depth: 0  # 需要完整 git log
+
+      - name: Checkout mdn/translated-content
+        uses: actions/checkout@v4
+        with:
+          repository: mdn/translated-content
+          path: translated-content
+
+      - name: Set up Node.js + js-yaml
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install js-yaml
+        run: npm install js-yaml
+
+      - name: Compare sourceCommit and generate log
+        run: |
+          LOG_FILE="log.txt"
+          > "$LOG_FILE"
+
+          find translated-content/files/zh-tw -name '*.md' | while read -r file; do
+            yaml_metadata=$(awk '/^---$/{y++} y==1' "$file")
+            source_commit=$(node -e "
+              const yaml = require('js-yaml');
+              const meta = yaml.load(\`${yaml_metadata}\`);
+              console.log(meta?.l10n?.sourceCommit || '');
+            ")
+
+            [ -z "$source_commit" ] && continue
+
+            relative_path=${file#translated-content/files/zh-tw}
+            en_path="files/en-us$relative_path"
+            en_file="content/$en_path"
+
+            [ ! -f "$en_file" ] && continue
+
+            latest_commit=$(git -C content log -n 1 --format=%H -- "$en_path")
+            [ "$source_commit" = "$latest_commit" ] && continue
+
+            distance=$(git -C content rev-list --count "$source_commit..$latest_commit" -- "$en_path")
+
+            echo "$relative_path, $distance" >> "$LOG_FILE"
+          done
+
+      - name: Upload log file
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdn-l10n-outdated-log
+          path: log.txt
+
+      - name: Send LINE broadcast message
+        if: success()
+        run: |
+          if [ -s log.txt ]; then
+            message="📢 MDN 翻譯更新提醒：\n\n"
+
+            while IFS= read -r line; do
+              message="${message}${line}\n"
+            done < log.txt
+
+            curl -X POST https://api.line.me/v2/bot/message/broadcast \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" \
+              -d "{
+                \"messages\": [
+                  {
+                    \"type\": \"text\",
+                    \"text\": \"${message}\"
+                  }
+                ]
+              }"
+          else
+            echo "No outdated files found."
+          fi
