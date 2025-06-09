@@ -88,23 +88,36 @@ jobs:
             if [ -z "$prefix" ]; then
               prefix="Others"
             fi
-
-            groups["$prefix"]+="${path}（+${distance}）\\n"
+            
+            # 直接在 Bash 字串中插入換行
+            groups["$prefix"]+="${path}（+${distance}）
+"
           done < log.txt
 
-          message="📢 MDN 翻譯更新提醒：\\n\\n"
+          # 直接在 Bash 字串中插入換行
+          message="📢 MDN 翻譯更新提醒：
+
+"
 
           for key in "${!groups[@]}"; do
-            message+="【${key}】\\n"
+            # 直接在 Bash 字串中插入換行
+            message+="【${key}】
+"
             message+="${groups[$key]}"
-            message+="\\n"
+            message+="
+"
           done
 
           total=$(wc -l < log.txt)
-          message+="---\\n總計未同步檔案：${total} 個"
+          # 直接在 Bash 字串中插入換行
+          message+="---
+總計未同步檔案：${total} 個"
 
-          # 用 jq 轉義 JSON（避免特殊字元出錯）
-          json_payload=$(jq -nc --arg text "$message" '{messages: [{type:"text", text:$text}]}')
+          # 關鍵步驟：使用 jq -R -s 將多行字串正確轉換為 JSON 格式
+          # -R (raw input) 將輸入視為原始字串
+          # -s (slurp) 將所有輸入讀取為一個單一字串
+          # . (dot) 表示 jq 將該字串作為其值
+          json_payload=$(echo -e "$message" | jq -R -s '{messages: [{type:"text", text:.}]}')
 
           curl -X POST https://api.line.me/v2/bot/message/broadcast \
             -H "Content-Type: application/json" \
