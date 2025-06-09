@@ -76,6 +76,9 @@ jobs:
           fi
 
           declare -A groups
+          
+          # 將換行符號直接儲存到變數中，而不是使用 \n
+          NEWLINE=$'\n' 
 
           while IFS= read -r line; do
             path=$(echo "$line" | cut -d',' -f1 | xargs) # 去除空白
@@ -88,36 +91,25 @@ jobs:
             if [ -z "$prefix" ]; then
               prefix="Others"
             fi
-            
-            # 直接在 Bash 字串中插入換行
-            groups["$prefix"]+="${path}（+${distance}）
-"
+
+            # 使用 NEWLINE 變數來實現換行
+            groups["$prefix"]+="${path}（+${distance}）${NEWLINE}"
           done < log.txt
 
-          # 直接在 Bash 字串中插入換行
-          message="📢 MDN 翻譯更新提醒：
-
-"
+          # 使用 printf 來構建包含實際換行符號的訊息
+          message=$(printf "📢 MDN 翻譯更新提醒：%s%s" "$NEWLINE" "$NEWLINE")
 
           for key in "${!groups[@]}"; do
-            # 直接在 Bash 字串中插入換行
-            message+="【${key}】
-"
+            message+=$(printf "【%s】%s" "$key" "$NEWLINE")
             message+="${groups[$key]}"
-            message+="
-"
+            message+=$(printf "%s" "$NEWLINE")
           done
 
           total=$(wc -l < log.txt)
-          # 直接在 Bash 字串中插入換行
-          message+="---
-總計未同步檔案：${total} 個"
+          message+=$(printf "---%s總計未同步檔案：%s 個" "$NEWLINE" "$total")
 
-          # 關鍵步驟：使用 jq -R -s 將多行字串正確轉換為 JSON 格式
-          # -R (raw input) 將輸入視為原始字串
-          # -s (slurp) 將所有輸入讀取為一個單一字串
-          # . (dot) 表示 jq 將該字串作為其值
-          json_payload=$(echo -e "$message" | jq -R -s '{messages: [{type:"text", text:.}]}')
+          # 直接將 message 變數傳遞給 jq，jq 會正確處理其中的換行符號
+          json_payload=$(jq -nc --arg text "$message" '{messages: [{type:"text", text:$text}]}')
 
           curl -X POST https://api.line.me/v2/bot/message/broadcast \
             -H "Content-Type: application/json" \
