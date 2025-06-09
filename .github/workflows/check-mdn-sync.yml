@@ -37,21 +37,16 @@ jobs:
           > "$LOG_FILE"
 
           find translated-content/files/zh-tw -name '*.md' | while read -r file; do
-            # 讀取 YAML metadata 並 base64 編碼，避免特殊字元影響 Node.js
-            yaml_metadata=$(awk '/^---$/{y++} y==1' "$file" | base64 -w 0)
-
+            yaml_metadata=$(awk '/^---$/{y++} y==1' "$file")
             source_commit=$(node -e "
               const yaml = require('js-yaml');
-              const yamlBase64 = process.argv[1];
-              const yamlString = Buffer.from(yamlBase64, 'base64').toString('utf-8');
-              const meta = yaml.load(yamlString);
+              const meta = yaml.load(\`${yaml_metadata}\`);
               console.log(meta?.l10n?.sourceCommit || '');
-            " "$yaml_metadata")
+            ")
 
             [ -z "$source_commit" ] && continue
 
             relative_path=${file#translated-content/files/zh-tw}
-            relative_path="/$relative_path"
             en_path="files/en-us$relative_path"
             en_file="content/$en_path"
 
@@ -72,10 +67,8 @@ jobs:
           name: mdn-l10n-outdated-log
           path: log.txt
 
-      - name: Send LINE message via Messaging API
+      - name: Format message and send LINE notification
         if: success()
-        env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
         run: |
           if [ ! -s log.txt ]; then
             echo "No outdated files found."
@@ -84,43 +77,36 @@ jobs:
 
           declare -A groups
 
-          # 分組：以路徑的第一層目錄作為群組標題
           while IFS= read -r line; do
-            # line 格式: /web/api/cssstylesheet/insertrule/index.md, 2
-            path=$(echo "$line" | cut -d',' -f1 | xargs)
+            path=$(echo "$line" | cut -d',' -f1 | xargs) # 去除空白
             distance=$(echo "$line" | cut -d',' -f2 | xargs)
-            group=$(echo "$path" | cut -d'/' -f2)  # 例如 web、games、mozilla 等
-            entry="• ${path}, ${distance}"
 
-            if [ -z "${groups[$group]}" ]; then
-              groups[$group]="$entry"
-            else
-              groups[$group]="${groups[$group]}"$'\n'"$entry"
+            # 取第一層資料夾+第二層資料夾作為分類標題，例如 web/api
+            prefix=$(echo "$path" | cut -d'/' -f2-3)
+
+            # 沒有就放 Others
+            if [ -z "$prefix" ]; then
+              prefix="Others"
             fi
+
+            groups["$prefix"]+="${path}（+${distance}）\\n"
           done < log.txt
 
-          message="📢 MDN 翻譯更新提醒：
-
-"
+          message="📢 MDN 翻譯更新提醒：\\n\\n"
 
           for key in "${!groups[@]}"; do
-            message+="【${key}】
-"
+            message+="【${key}】\\n"
             message+="${groups[$key]}"
-            message+="
-
-"
+            message+="\\n"
           done
 
           total=$(wc -l < log.txt)
-          message+="---
-總計未同步檔案：${total} 個
-"
+          message+="---\\n總計未同步檔案：${total} 個"
 
-          # 轉換成 JSON 並發送
+          # 用 jq 轉義 JSON（避免特殊字元出錯）
           json_payload=$(jq -nc --arg text "$message" '{messages: [{type:"text", text:$text}]}')
 
           curl -X POST https://api.line.me/v2/bot/message/broadcast \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $LINE_CHANNEL_ACCESS_TOKEN" \
+            -H "Authorization: Bearer ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" \
             -d "$json_payload"
