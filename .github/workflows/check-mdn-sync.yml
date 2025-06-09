@@ -67,8 +67,10 @@ jobs:
           name: mdn-l10n-outdated-log
           path: log.txt
 
-      - name: Format message and send LINE notification
+      - name: Send LINE message via Messaging API
         if: success()
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
         run: |
           if [ ! -s log.txt ]; then
             echo "No outdated files found."
@@ -77,37 +79,43 @@ jobs:
 
           declare -A groups
 
+          # 分組：以路徑的第一層目錄作為群組標題
           while IFS= read -r line; do
-            path=$(echo "$line" | cut -d',' -f1 | xargs) # 去除空白
+            # line 格式: /web/api/cssstylesheet/insertrule/index.md, 2
+            path=$(echo "$line" | cut -d',' -f1 | xargs)
             distance=$(echo "$line" | cut -d',' -f2 | xargs)
+            group=$(echo "$path" | cut -d'/' -f2)  # 例如 web、games、mozilla 等
+            entry="• ${path}, ${distance}"
 
-            # 取第一層資料夾+第二層資料夾作為分類標題，例如 web/api
-            prefix=$(echo "$path" | cut -d'/' -f2-3)
-
-            # 沒有就放 Others
-            if [ -z "$prefix" ]; then
-              prefix="Others"
+            if [ -z "${groups[$group]}" ]; then
+              groups[$group]="$entry"
+            else
+              groups[$group]="${groups[$group]}"$'\n'"$entry"
             fi
-
-            groups["$prefix"]+="${path}（+${distance}）\n"
           done < log.txt
 
-          message="📢 MDN 翻譯更新提醒：\n\n"
+          message="📢 MDN 翻譯更新提醒：
+
+"
 
           for key in "${!groups[@]}"; do
-            message+="【${key}】\n"
+            message+="【${key}】
+"
             message+="${groups[$key]}"
-            message+="\n"
+            message+="
+
+"
           done
 
           total=$(wc -l < log.txt)
-          message+="---\n總計未同步檔案：${total} 個"
+          message+="---
+總計未同步檔案：${total} 個
+"
 
-          # 用 jq 轉義 JSON（避免特殊字元出錯）
+          # 轉換成 JSON 並發送
           json_payload=$(jq -nc --arg text "$message" '{messages: [{type:"text", text:$text}]}')
 
           curl -X POST https://api.line.me/v2/bot/message/broadcast \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" \
+            -H "Authorization: Bearer $LINE_CHANNEL_ACCESS_TOKEN" \
             -d "$json_payload"
-
