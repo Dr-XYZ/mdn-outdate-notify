@@ -15,58 +15,51 @@ jobs:
         with:
           repository: mdn/content
           path: content
-          fetch-depth: 0
+          fetch-depth: 0  # 需要完整 git log
 
       - name: Checkout mdn/translated-content
         uses: actions/checkout@v4
         with:
           repository: mdn/translated-content
           path: translated-content
-          fetch-depth: 0
 
-      - name: Setup Node.js and install js-yaml
+      - name: Set up Node.js + js-yaml
         uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install js-yaml
+
+      - name: Install js-yaml
+        run: npm install js-yaml
 
       - name: Compare sourceCommit and generate log
         run: |
           LOG_FILE="log.txt"
           > "$LOG_FILE"
 
-          # 抓取翻譯檔案列表
           find translated-content/files/zh-tw -name '*.md' | while read -r file; do
-            # 用 awk 抓 yaml header
-            yaml_metadata=$(awk '/^---$/,/^---$/' "$file" | sed '1d;$d' | tr '\n' '\\n')
-            
+            # 讀取 YAML metadata 並 base64 編碼，避免特殊字元影響 Node.js
+            yaml_metadata=$(awk '/^---$/{y++} y==1' "$file" | base64 -w 0)
+
             source_commit=$(node -e "
               const yaml = require('js-yaml');
-              try {
-                const meta = yaml.load(process.argv[1]);
-                console.log(meta?.l10n?.sourceCommit || '');
-              } catch (e) {
-                process.exit(0);
-              }
+              const yamlBase64 = process.argv[1];
+              const yamlString = Buffer.from(yamlBase64, 'base64').toString('utf-8');
+              const meta = yaml.load(yamlString);
+              console.log(meta?.l10n?.sourceCommit || '');
             " "$yaml_metadata")
 
-            if [ -z "$source_commit" ]; then
-              continue
-            fi
+            [ -z "$source_commit" ] && continue
 
             relative_path=${file#translated-content/files/zh-tw}
+            relative_path="/$relative_path"
             en_path="files/en-us$relative_path"
             en_file="content/$en_path"
 
-            if [ ! -f "$en_file" ]; then
-              continue
-            fi
+            [ ! -f "$en_file" ] && continue
 
             latest_commit=$(git -C content log -n 1 --format=%H -- "$en_path")
 
-            if [ "$source_commit" = "$latest_commit" ]; then
-              continue
-            fi
+            [ "$source_commit" = "$latest_commit" ] && continue
 
             distance=$(git -C content rev-list --count "$source_commit..$latest_commit" -- "$en_path")
 
@@ -91,10 +84,12 @@ jobs:
 
           declare -A groups
 
+          # 分組：以路徑的第一層目錄作為群組標題
           while IFS= read -r line; do
+            # line 格式: /web/api/cssstylesheet/insertrule/index.md, 2
             path=$(echo "$line" | cut -d',' -f1 | xargs)
             distance=$(echo "$line" | cut -d',' -f2 | xargs)
-            group=$(echo "$path" | cut -d'/' -f2)
+            group=$(echo "$path" | cut -d'/' -f2)  # 例如 web、games、mozilla 等
             entry="• ${path}, ${distance}"
 
             if [ -z "${groups[$group]}" ]; then
@@ -104,18 +99,28 @@ jobs:
             fi
           done < log.txt
 
-          message="📢 MDN 翻譯更新提醒：\n\n"
+          message="📢 MDN 翻譯更新提醒：
+
+"
 
           for key in "${!groups[@]}"; do
-            message+="【${key}】\n${groups[$key]}\n\n"
+            message+="【${key}】
+"
+            message+="${groups[$key]}"
+            message+="
+
+"
           done
 
           total=$(wc -l < log.txt)
-          message+="---\n總計未同步檔案：${total} 個\n"
+          message+="---
+總計未同步檔案：${total} 個
+"
 
+          # 轉換成 JSON 並發送
           json_payload=$(jq -nc --arg text "$message" '{messages: [{type:"text", text:$text}]}')
 
-          curl --fail -X POST https://api.line.me/v2/bot/message/broadcast \
+          curl -X POST https://api.line.me/v2/bot/message/broadcast \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $LINE_CHANNEL_ACCESS_TOKEN" \
             -d "$json_payload"
