@@ -3,114 +3,125 @@ name: Check MDN translation sync and send LINE notify
 on:
   schedule:
     - cron: '0 4 * * *'  # 每天 12:00 台灣時間（UTC+8）
-  workflow_dispatch:
+  workflow_dispatch: # 允許手動觸發
 
 jobs:
   check-and-notify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # 在 Ubuntu 環境執行
 
     steps:
-      - name: Checkout mdn/content
+      - name: Checkout mdn/content # 下載 mdn/content 儲存庫
         uses: actions/checkout@v4
         with:
           repository: mdn/content
           path: content
-          fetch-depth: 0  # 需要完整 git log
+          fetch-depth: 0  # 需要完整 git log 來比較提交歷史
 
-      - name: Checkout mdn/translated-content
+      - name: Checkout mdn/translated-content # 下載 mdn/translated-content 儲存庫
         uses: actions/checkout@v4
         with:
           repository: mdn/translated-content
           path: translated-content
 
-      - name: Set up Node.js + js-yaml
+      - name: Set up Node.js + js-yaml # 設定 Node.js 環境並安裝 js-yaml
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install js-yaml
+      - name: Install js-yaml # 安裝 js-yaml npm 套件
         run: npm install js-yaml
 
-      - name: Compare sourceCommit and generate log
+      - name: Compare sourceCommit and generate log # 比較原文與翻譯的 sourceCommit 並產生日誌
         run: |
           LOG_FILE="log.txt"
-          > "$LOG_FILE"
+          > "$LOG_FILE" # 清空或建立日誌檔
 
+          # 尋找所有繁體中文的 Markdown 檔案
           find translated-content/files/zh-tw -name '*.md' | while read -r file; do
+            # 提取 YAML Front Matter
             yaml_metadata=$(awk '/^---$/{y++} y==1' "$file")
+            # 使用 Node.js 和 js-yaml 解析 sourceCommit
             source_commit=$(node -e "
               const yaml = require('js-yaml');
               const meta = yaml.load(\`${yaml_metadata}\`);
               console.log(meta?.l10n?.sourceCommit || '');
             ")
 
-            [ -z "$source_commit" ] && continue
+            [ -z "$source_commit" ] && continue # 如果沒有 sourceCommit 則跳過
 
+            # 構建對應的英文原文路徑
             relative_path=${file#translated-content/files/zh-tw}
             en_path="files/en-us$relative_path"
             en_file="content/$en_path"
 
-            [ ! -f "$en_file" ] && continue
+            [ ! -f "$en_file" ] && continue # 如果英文原文檔案不存在則跳過
 
+            # 取得英文原文檔案的最新提交 ID
             latest_commit=$(git -C content log -n 1 --format=%H -- "$en_path")
 
-            [ "$source_commit" = "$latest_commit" ] && continue
+            [ "$source_commit" = "$latest_commit" ] && continue # 如果提交 ID 相同則表示已同步，跳過
 
+            # 計算翻譯落後原文的提交數量
             distance=$(git -C content rev-list --count "$source_commit..$latest_commit" -- "$en_path")
 
+            # 將結果寫入日誌檔
             echo "$relative_path, $distance" >> "$LOG_FILE"
           done
 
-      - name: Upload log file
+      - name: Upload log file # 上傳日誌檔作為 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: mdn-l10n-outdated-log
           path: log.txt
 
-      - name: Format message and send LINE notification
-        if: success()
+      - name: Format message and send LINE notification # 格式化訊息並發送 LINE 通知
+        if: success() # 僅在前面的步驟成功時執行
         run: |
-          if [ ! -s log.txt ]; then
+          if [ ! -s log.txt ]; then # 如果日誌檔為空，表示沒有過時檔案
             echo "No outdated files found."
             exit 0
           fi
 
-          declare -A groups
-          
-          # 將換行符號直接儲存到變數中，而不是使用 \n
-          NEWLINE=$'\n' 
+          declare -A groups # 宣告一個關聯陣列來儲存分類後的檔案
+
+          NEWLINE=$'\n' # 定義一個包含實際換行符號的變數
 
           while IFS= read -r line; do
-            path=$(echo "$line" | cut -d',' -f1 | xargs) # 去除空白
-            distance=$(echo "$line" | cut -d',' -f2 | xargs)
+            path=$(echo "$line" | cut -d',' -f1 | xargs) # 提取檔案路徑並去除空白
+            distance=$(echo "$line" | cut -d',' -f2 | xargs) # 提取落後數量並去除空白
 
-            # 取第一層資料夾+第二層資料夾作為分類標題，例如 web/api
+            # 從路徑中提取前兩層資料夾作為分類標題（例如：web/api）
             prefix=$(echo "$path" | cut -d'/' -f2-3)
 
-            # 沒有就放 Others
-            if [ -z "$prefix" ]; then
+            if [ -z "$prefix" ]; then # 如果沒有前綴，歸類到 "Others"
               prefix="Others"
             fi
 
-            # 使用 NEWLINE 變數來實現換行
+            # 將檔案資訊追加到對應分類的訊息中
             groups["$prefix"]+="${path}（+${distance}）${NEWLINE}"
           done < log.txt
 
-          # 使用 printf 來構建包含實際換行符號的訊息
+          # 構建 LINE 訊息的開頭部分
           message=$(printf "📢 MDN 翻譯更新提醒：%s%s" "$NEWLINE" "$NEWLINE")
 
+          # 遍歷分類並將其內容追加到訊息中
           for key in "${!groups[@]}"; do
-            message+=$(printf "【%s】%s" "$key" "$NEWLINE")
-            message+="${groups[$key]}"
-            message+=$(printf "%s" "$NEWLINE")
+            message+=$(printf "【%s】%s" "$key" "$NEWLINE") # 添加分類標題
+            message+="${groups[$key]}" # 添加該分類下的檔案列表
+            message+=$(printf "%s" "$NEWLINE") # 添加一個空行分隔不同分類
           done
 
-          total=$(wc -l < log.txt)
-          message+=$(printf "---%s總計未同步檔案：%s 個" "$NEWLINE" "$total")
+          total=$(wc -l < log.txt) # 獲取過時檔案的總數量
+          
+          # 將 "---" 作為單獨的字串追加，避免 printf 錯誤
+          message+="---"
+          # 繼續追加總計資訊，使用 NEWLINE 換行
+          message+=$(printf "%s總計未同步檔案：%s 個" "$NEWLINE" "$total")
 
-          # 直接將 message 變數傳遞給 jq，jq 會正確處理其中的換行符號
+          # 使用 jq 將訊息內容轉義為 JSON 格式，確保換行符號被正確處理
           json_payload=$(jq -nc --arg text "$message" '{messages: [{type:"text", text:$text}]}')
 
+          # 發送 LINE Notify 廣播訊息
           curl -X POST https://api.line.me/v2/bot/message/broadcast \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" \
