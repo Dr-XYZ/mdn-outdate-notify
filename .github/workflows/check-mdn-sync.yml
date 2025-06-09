@@ -1,4 +1,4 @@
-name: Check MDN translation sync and send LINE broadcast
+name: Check MDN translation sync and send LINE notify
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  check-and-broadcast:
+  check-and-notify:
     runs-on: ubuntu-latest
 
     steps:
@@ -53,6 +53,7 @@ jobs:
             [ ! -f "$en_file" ] && continue
 
             latest_commit=$(git -C content log -n 1 --format=%H -- "$en_path")
+
             [ "$source_commit" = "$latest_commit" ] && continue
 
             distance=$(git -C content rev-list --count "$source_commit..$latest_commit" -- "$en_path")
@@ -66,27 +67,47 @@ jobs:
           name: mdn-l10n-outdated-log
           path: log.txt
 
-      - name: Send LINE broadcast message
+      - name: Format message and send LINE notification
         if: success()
         run: |
-          if [ -s log.txt ]; then
-            message="📢 MDN 翻譯更新提醒：\n\n"
-
-            while IFS= read -r line; do
-              message="${message}${line}\n"
-            done < log.txt
-
-            curl -X POST https://api.line.me/v2/bot/message/broadcast \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" \
-              -d "{
-                \"messages\": [
-                  {
-                    \"type\": \"text\",
-                    \"text\": \"${message}\"
-                  }
-                ]
-              }"
-          else
+          if [ ! -s log.txt ]; then
             echo "No outdated files found."
+            exit 0
           fi
+
+          declare -A groups
+
+          while IFS= read -r line; do
+            path=$(echo "$line" | cut -d',' -f1 | xargs) # 去除空白
+            distance=$(echo "$line" | cut -d',' -f2 | xargs)
+
+            # 取第一層資料夾+第二層資料夾作為分類標題，例如 web/api
+            prefix=$(echo "$path" | cut -d'/' -f2-3)
+
+            # 沒有就放 Others
+            if [ -z "$prefix" ]; then
+              prefix="Others"
+            fi
+
+            groups["$prefix"]+="${path}（+${distance}）\n"
+          done < log.txt
+
+          message="📢 MDN 翻譯更新提醒：\n\n"
+
+          for key in "${!groups[@]}"; do
+            message+="【${key}】\n"
+            message+="${groups[$key]}"
+            message+="\n"
+          done
+
+          total=$(wc -l < log.txt)
+          message+="---\n總計未同步檔案：${total} 個"
+
+          # 用 jq 轉義 JSON（避免特殊字元出錯）
+          json_payload=$(jq -nc --arg text "$message" '{messages: [{type:"text", text:$text}]}')
+
+          curl -X POST https://api.line.me/v2/bot/message/broadcast \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" \
+            -d "$json_payload"
+
